@@ -105,25 +105,48 @@ layers:
     breathing  10 1 top (.5,.5,1)
 ```
 
-This has defined an effect called `panel_idle` that can be controlled
-via the gcode command `SET_LED_EFFECT EFFECT=panel_idle`. Calling the command
-enables this effect. It can be disabled again by calling 
-`SET_LED_EFFECT EFFECT=panel_idle STOP=1`. Running `STOP_LED_EFFECTS` disables
-all active effects.
+This has defined an effect called `panel_idle`.
+
+### Controlling the effects
+Effects can be active or inactive. Inactive effects don't output any color 
+data, while active effects return color data, that is added up for each LED 
+they run on.
+
+#### Activating and deactivating effects
+Our example effect can be activated by running the GCode command 
+`SET_LED_EFFECT EFFECT=panel_idle`.
+Running the command `SET_LED_EFFECT EFFECT=panel_idle STOP=1` deactivates this 
+particular effect again.
+To deactivate all effects we can use the GCode command `STOP_LED_EFFECTS`.
+
+#### Fading in and out
+Effects can be faded in and out by specifying the `FADETIME` parameter:
+`SET_LED_EFFECT EFFECT=panel_idle FADETIME=1.0` fades the effect in during one 
+second. Running `SET_LED_EFFECT EFFECT=panel_idle STOP=1 FADETIME=1.0` fades it 
+out in one second. We can also fade out all effects by running 
+`STOP_LED_EFFECTS FADETIME=1.0`. It is also possible to crossfade effects by 
+running a fade in command and a fade out command successively.
 
 ### Additional effect level parameters
 
 autostart: true
-Setting this to true
-frame_rate
+Starts the effect on startup
 
-run_on_error
+frame_rate:
+Sets the frame rate in frames per second for the effect
 
-heater
+run_on_error:
+Keeps the last color on a shutdown. (Currently not working)
 
-analog_pin
+heater:
+Specifies the heater to use for a heater effect. For a temperature fan put 
+temperature_fan and use quotes: `heater: "temperature_fan myfan"`
 
-stepper
+analog_pin:
+Specifies the pin to use for effects using an analog signal.
+
+stepper:
+Specifies the stepper motor to use for the stepper effect.
 
 ## Defining LEDs
 
@@ -192,8 +215,8 @@ Some Sample Palettes:
 
 ```
 layers:
-   breathing  .5 screen (0,.1,1), (0,1,.5), (0, 1,1), (0,.1,.5)
-   static     1  bottom (1,.1,0), (1,.1,0), (1,.1,0), (1,1,0)
+   breathing  .5 0 screen (0,.1,1), (0,1,.5), (0, 1,1), (0,.1,.5)
+   static     1 0 bottom (1,.1,0), (1,.1,0), (1,.1,0), (1,1,0)
 ```
 There are several effects to choose from.
 
@@ -372,6 +395,13 @@ in channels becoming brighter.
 
 #### subtract
 ```
+    ( b - t )
+```
+The the top layer is subtracted from the bottom layer. This results in darkening
+similar colors.
+
+#### subtract_b
+```
     ( t - b )
 ```
 The the bottom layer is subtracted from the top layer. This results in darkening
@@ -400,6 +430,12 @@ The channels are multiplied together, this is useful to darken colors
     ( t / b )
 ```
 The channels are divided, this results in brightening colors, often to white
+
+#### divide_inv
+```
+    ( b / t )
+```
+Like divide, but bottom divided by top
 
 #### screen
 ```
@@ -498,7 +534,6 @@ leds:
     neopixel:progress_lights
 autostart:                          true
 frame_rate:                         24
-analog_pin:                         ar52
 layers:
     progress  -1  0 add         ( 0, 0,   1),( 0, 0.1, 0.6)
     static     0  0 top         ( 0, 0, 0.1)

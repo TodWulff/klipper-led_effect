@@ -6,7 +6,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import neopixel, dotstar
+#import logging
 import logging
 from math import cos, exp, pi
 from random import randint
@@ -15,11 +15,6 @@ ANALOG_SAMPLE_TIME  = 0.001
 ANALOG_SAMPLE_COUNT = 5
 ANALOG_REPORT_TIME  = 0.05
 
-
-## TODO:
-#  Disable individual layers by layer index
-#  Blending between multiple concurrent effects
-############
 
 ######################################################################
 # Custom color value list, returns lists of [r, g ,b] values
@@ -108,8 +103,12 @@ class ledFrameHandler:
     def addEffect(self, effect):
 
         if effect.heater:
-            pheater = self.printer.lookup_object('heaters')
-            self.heaters[effect.heater] = pheater.lookup_heater(effect.heater)
+            effect.heater=effect.heater.strip('\"\'')
+            if effect.heater.startswith("temperature_fan "):
+                self.heaters[effect.heater] = self.printer.lookup_object(effect.heater)
+            else:
+                pheater = self.printer.lookup_object('heaters')
+                self.heaters[effect.heater] = pheater.lookup_heater(effect.heater)
             self.heaterLast[effect.heater] = 100
             self.heaterCurrent[effect.heater] = 0
             self.heaterTarget[effect.heater]  = 0
@@ -162,20 +161,36 @@ class ledFrameHandler:
     def _getFrames(self, eventtime):
         chainsToUpdate = set()
 
+        #first set all LEDs to 0, that should be updated
         for effect in self.effects:
-            if eventtime > effect.nextEventTime:
-                frame = effect.getFrame(eventtime)
+            frame, update = effect.getFrame(eventtime)
+            if update:
                 for i in range(effect.ledCount):
                     s = effect.leds[i][1]
                     chain = effect.leds[i][0]
                     getColorData = effect.leds[i][2]
                     color_len =  effect.leds[i][3]
                     offset =  effect.leds[i][4]
-                    #TODO: blend instead of overwrite
                     with chain.mutex:
                         chain.color_data[s+offset:s+offset+color_len] = \
-                            getColorData(*frame[i*3:i*3+3])
+                            getColorData(*[0,0,0])
+                    chainsToUpdate.add(chain)
 
+        #then sum up all effects for that LEDs
+        for effect in self.effects:
+            frame, update = effect.getFrame(eventtime)
+            if update:
+                for i in range(effect.ledCount):
+                    s = effect.leds[i][1]
+                    chain = effect.leds[i][0]
+                    getColorData = effect.leds[i][2]
+                    color_len =  effect.leds[i][3]
+                    offset =  effect.leds[i][4]
+                    with chain.mutex:
+                        chain.color_data[s+offset:s+offset+color_len] = \
+                            [min(255,a+b) for a,b in \
+                            zip(chain.color_data[s+offset:s+offset+color_len],\
+                                getColorData(*frame[i*3:i*3+3]))]
                     chainsToUpdate.add(chain)
 
         for chain in chainsToUpdate:
@@ -193,6 +208,8 @@ class ledFrameHandler:
 
     def cmd_STOP_LED_EFFECTS(self, gcmd):
         for effect in self.effects:
+            if effect.enabled:
+                effect.set_fade_time(gcmd.get_float('FADETIME', 0.0))
             effect.set_enabled(False)
 
 def load_config(config):
@@ -214,17 +231,22 @@ class ledEffect:
         self.iteration    = 0
         self.layers       = []
         self.analogValue  = 0
+        self.fadeValue    = 1.0
+        self.fadeTime     = 0.0
+        self.fadeEndTime  = 0
 
         #Basic functions for layering colors. t=top and b=bottom color
         self.blendingModes  = {
             'top'       : (lambda t, b: t ),
             'bottom'    : (lambda t, b: b ),
             'add'       : (lambda t, b: t + b ),
-            'subtract'  : (lambda t, b: (t - b) * (t - b > 0)),
+            'subtract'  : (lambda t, b: (b - t) * (b - t > 0)),
+            'subtract_b': (lambda t, b: (t - b) * (t - b > 0)),
             'difference': (lambda t, b: (t - b) * (t > b) + (b - t) * (t <= b)),
             'average'   : (lambda t, b: 0.5 * (t + b)),
             'multiply'  : (lambda t, b: t * b),
             'divide'    : (lambda t, b: t / b if b > 0 else 0 ),
+            'divide_inv': (lambda t, b: b / t if t > 0 else 0 ),
             'screen'    : (lambda t, b: 1.0 - (1.0-t)*(1.0-b) ),
             'lighten'   : (lambda t, b: t * (t > b) +  b * (t <= b)),
             'darken'    : (lambda t, b: t * (t < b) +  b * (t >= b)),
@@ -285,56 +307,56 @@ class ledEffect:
 
                     if ledChain.color_order == 'RGB':
                         getColorData = (lambda r, g, b:
-                                        ( int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0),
-                                          int(clamp(b) * 255.0)))
+                                        ( int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))))
 
                     elif ledChain.color_order == 'GRB':
                         getColorData = (lambda r, g, b:
-                                        ( int(clamp(g) * 255.0),
-                                          int(clamp(r) * 255.0),
-                                          int(clamp(b) * 255.0)))
+                                        ( int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))))
 
                     elif ledChain.color_order == 'BRG':
                         getColorData = (lambda r, g, b:
-                                        ( int(clamp(b) * 255.0),
-                                          int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0)))
+                                        ( int(clamp(b) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue))))
 
                     elif ledChain.color_order == 'RGBW':
                         getColorData = (lambda r, g, b:
                                         self._rgb2rgbw((
-                                          int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0),
-                                          int(clamp(b) * 255.0)),
+                                          int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))),
                                           'RGBW' ))
 
                     elif ledChain.color_order == 'GRBW':
                         getColorData = (lambda r, g, b:
                                         self._rgb2rgbw((
-                                          int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0),
-                                          int(clamp(b) * 255.0)),
+                                          int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))),
                                           'GRBW' ))
                     else:
                         getColorData = (lambda r, g, b:
-                                        ( int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0),
-                                          int(clamp(b) * 255.0)))
+                                        ( int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))))
 
                 elif parms[0].startswith('dotstar'):
                     getColorData = (lambda r, g, b:
                                     ( 0xFF,
-                                      int(clamp(b) * 255.0),
-                                      int(clamp(g) * 255.0),
-                                      int(clamp(r) * 255.0)))
+                                      int(clamp(b) * 255.0 * clamp(self.fadeValue)),
+                                      int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                      int(clamp(r) * 255.0 * clamp(self.fadeValue))))
                     color_len = 4
                     offset = 4
                 else: 
                     getColorData = (lambda r, g, b:
-                                        ( int(clamp(r) * 255.0),
-                                          int(clamp(g) * 255.0),
-                                          int(clamp(b) * 255.0)))
+                                        ( int(clamp(r) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(g) * 255.0 * clamp(self.fadeValue)),
+                                          int(clamp(b) * 255.0 * clamp(self.fadeValue))))
                     color_len = 3
 
                
@@ -346,8 +368,14 @@ class ledEffect:
                     if led:
                         if '-' in led:
                             start, stop = map(int,led.split('-'))
-                            for i in range(start-1, stop):
-                                self.leds.append([ledChain, 
+                            if stop == start:
+                                ledList = [start-1]
+                            elif stop > start:
+                                ledList = list(range(start-1, stop))
+                            else:
+                                ledList = list(reversed(range(stop-1, start)))
+                            for i in ledList:
+                                self.leds.append([ledChain,
                                     int(i) * color_len, getColorData, color_len, offset])
                         else:
                             for i in led.split(','):
@@ -359,6 +387,7 @@ class ledEffect:
                                     int(i) * color_len, getColorData, color_len, offset])
 
         self.ledCount = len(self.leds)
+        self.frame = [0.0] * 3 * self.ledCount
 
         #enumerate all effects from the subclasses of _layerBase...
         availableLayers = {str(c).rpartition('.layer')[2]\
@@ -423,31 +452,53 @@ class ledEffect:
             return (g_out, r_out, b_out, w_out)
 
     def getFrame(self, eventtime):
-
-        frame = [0.0] * 3 * self.ledCount
-        if not self.enabled:
-            self.nextEventTime = self.handler.reactor.NEVER
-            return frame
+        if not self.enabled and self.fadeTime <= 0.0:
+            if self.nextEventTime < self.handler.reactor.NEVER:
+                # Effect has just been disabled. Set colors to 0 and update once.
+                self.nextEventTime = self.handler.reactor.NEVER
+                self.frame = [0.0] * 3 * self.ledCount
+                update = True
+            else:
+                update = False
         else:
-            self.nextEventTime = eventtime + self.frameRate
+            update = True
+            if eventtime > self.nextEventTime:
+                self.nextEventTime = eventtime + self.frameRate
 
-        for layer in self.layers:
-            layerFrame = layer.nextFrame(eventtime)
+                self.frame = [0.0] * 3 * self.ledCount
+                for layer in self.layers:
+                    layerFrame = layer.nextFrame(eventtime)
 
-            if layerFrame:
-                blend = self.blendingModes[layer.blendingMode]
-                frame = [blend(t, b) for t, b in zip(layerFrame, frame)]
-        return frame
+                    if layerFrame:
+                        blend = self.blendingModes[layer.blendingMode]
+                        self.frame = [blend(t, b) for t, b in zip(layerFrame, self.frame)]
+
+                if (self.fadeEndTime > eventtime) and (self.fadeTime > 0.0):
+                    remainingFade = ((self.fadeEndTime - eventtime) / self.fadeTime)
+                else:
+                    remainingFade = 0.0    
+
+                self.fadeValue = 1.0-remainingFade if self.enabled else remainingFade
+
+        return self.frame, update
 
     def set_enabled(self, state):
         self.enabled = state
         if self.enabled:
             self.nextEventTime = self.handler.reactor.NOW
+    
+    def set_fade_time(self, fadetime):
+        self.fadeTime = fadetime
+        self.fadeEndTime = self.handler.reactor.monotonic() + fadetime
 
     def cmd_SET_LED_EFFECT(self, gcmd):
+        self.set_fade_time(gcmd.get_float('FADETIME', 0.0))
         if gcmd.get_int('STOP', 0) == 1:
+            if self.enabled:
+                self.set_fade_time(gcmd.get_float('FADETIME', 0.0))
             self.set_enabled(False)
         else:
+            self.set_fade_time(gcmd.get_float('FADETIME', 0.0))
             self.set_enabled(True)
 
     def _handle_shutdown(self):
@@ -870,14 +921,14 @@ class ledEffect:
                 trailing = colorArray([0.0,0.0,0.0] * self.ledCount)
             else:
                 trailing = colorArray(self._gradient(self.paletteColors[1:],
-                                                     self.effectRate, True))
+                                                     int(self.effectRate), True))
                 trailing.padLeft([0.0,0.0,0.0], self.ledCount)
 
             if self.effectCutoff == 0:
                 leading = colorArray([0.0,0.0,0.0] * self.ledCount)
             else:
                 leading = colorArray(self._gradient(self.paletteColors[1:],
-                                                    self.effectCutoff, False))
+                                                    int(self.effectCutoff), False))
                 leading.padRight([0.0,0.0,0.0], self.ledCount)
 
             gradient = colorArray(trailing + self.paletteColors[0] + leading)
@@ -931,7 +982,7 @@ class ledEffect:
                 c = randint(0,self.effectCutoff)
                 self.heatMap[h] -= (self.heatMap[h] - c >= 0 ) * c
 
-            for i in range(self.ledCount - 1, 2, -1):
+            for i in range(self.ledCount - 1, self.heatSource, -1):
                 d = (self.heatMap[i - 1] +
                      self.heatMap[i - 2] +
                      self.heatMap[i - 3] ) / 3
@@ -995,7 +1046,7 @@ class ledEffect:
                     c = randint(0, cooling)
                     self.heatMap[h] -= (self.heatMap[h] - c >= 0 ) * c
 
-                for i in range(self.ledCount - 1, 2, -1):
+                for i in range(self.ledCount - 1, self.heatSource, -1):
                     d = (self.heatMap[i - 1] +
                          self.heatMap[i - 2] +
                          self.heatMap[i - 3] ) / 3
@@ -1031,14 +1082,14 @@ class ledEffect:
                 trailing = colorArray([0.0,0.0,0.0] * self.ledCount)
             else:
                 trailing = colorArray(self._gradient(self.paletteColors[1:],
-                                                     self.effectRate, True))
+                                                     int(self.effectRate), True))
                 trailing.padLeft([0.0,0.0,0.0], self.ledCount)
 
             if self.effectCutoff == 0:
                 leading = colorArray([0.0,0.0,0.0] * self.ledCount)
             else:
                 leading = colorArray(self._gradient(self.paletteColors[1:],
-                                                    self.effectCutoff, False))
+                                                    int(self.effectCutoff), False))
                 leading.padRight([0.0,0.0,0.0], self.ledCount)
 
             gradient = colorArray(trailing + self.paletteColors[0] + leading)
